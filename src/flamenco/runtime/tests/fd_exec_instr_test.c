@@ -1603,6 +1603,9 @@ fd_exec_block_test_run( fd_exec_instr_test_runner_t * runner, // Runner only con
     fd_exec_slot_ctx_t *  slot_ctx      = fd_exec_slot_ctx_join ( fd_exec_slot_ctx_new ( slot_ctx_mem, fd_alloc_virtual( alloc ) ) );
 
     int res = _block_context_create_and_exec( runner, slot_ctx, input );
+    if( res==0 ) {
+      
+    }
     
     // TODO
     (void)res;
@@ -1612,21 +1615,6 @@ fd_exec_block_test_run( fd_exec_instr_test_runner_t * runner, // Runner only con
     return 0;
 
   } FD_SCRATCH_SCOPE_END;
-
-  // FD_SCRATCH_SCOPE_BEGIN {
-  //     /* Initialize memory */
-  //   fd_wksp_t *           wksp          = fd_wksp_attach( "wksp" );
-  //   fd_alloc_t *          alloc         = fd_alloc_join( fd_alloc_new( fd_wksp_alloc_laddr( wksp, fd_alloc_align(), fd_alloc_footprint(), 2 ), 2 ), 0 );
-  //   uchar *               slot_ctx_mem  = fd_scratch_alloc( FD_EXEC_SLOT_CTX_ALIGN,  FD_EXEC_SLOT_CTX_FOOTPRINT  );
-  //   fd_exec_slot_ctx_t *  slot_ctx      = fd_exec_slot_ctx_join ( fd_exec_slot_ctx_new ( slot_ctx_mem, fd_alloc_virtual( alloc ) ) );
-
-  //   /* Create and exec transaction */
-  //   fd_execute_txn_task_info_t * task_info = _txn_context_create_and_exec( runner, slot_ctx, input );
-  //   if( task_info == NULL ) {
-  //     _txn_context_destroy( runner, NULL, slot_ctx, wksp, alloc );
-  //     return 0UL;
-  //   }
-  //   fd_exec_txn_ctx_t * txn_ctx = task_info->txn_ctx;
 
   //   int exec_res = task_info->exec_res;
 
