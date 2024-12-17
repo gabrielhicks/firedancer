@@ -6,17 +6,32 @@
 
    Protocol details:
 
-   - LMD is an acronym for "latest message-driven". It denotes the
-     specific flavor of GHOST implementation, ie. only a
-     validator's latest vote counts.
+   - LMD is an acronym for "latest message-driven".  It describes how
+     votes are counted when picking the best fork.  In this scheme, only
+     a validator's latest vote counts.  So if a validator votes for slot 
+     3 and then slot 5, the vote for 5 overwrites the vote for 3.
 
    - GHOST is an acronym for "greedy heaviest-observed subtree":
-     - greedy:   pick the locally optimal subtree / fork based on our
-                 current view (which may not be globally optimal).
-     - heaviest: pick based on the highest stake weight.
-     - observed: this is the validator's local view, and other
-                 validators may have differing views.
-     - subtree:  pick a subtree, not an individual node.
+
+     greedy:   for each depth of the tree, pick the locally optimal
+               child / subtree / fork.  This will result in the global
+               optimal choice.
+
+     heaviest: pick based on the highest stake weight.
+
+     observed: this is the validator's local view, and other validators
+               may have differing views because they've observed
+               different votes.
+
+     subtree:  pick based on the weight of an entire subtree, not just
+               an individual node.  For example, if slot 3 has 10 stake
+               and slot 5 has 5 stake, but slot 5 has two children 6
+               and 7 that each have 3 stake, our weights are
+
+               slot 3 subtree [3]        = 10
+               slot 5 subtree [5, 6, 7]  = 11 (5+3+3)
+
+               Therefore slot 5 would be the heaviest.
 
    In-memory representation:
 
@@ -31,7 +46,6 @@
    not prerequisite reading for understanding this implementation. */
 
 #include "../fd_choreo_base.h"
-#include <stdbool.h>
 
 /* FD_GHOST_USE_HANDHOLDING:  Define this to non-zero at compile time
    to turn on additional runtime checks and logging. */
@@ -40,29 +54,25 @@
 #define FD_GHOST_USE_HANDHOLDING 1
 #endif
 
-/* clang-format off */
-
 /* fd_ghost_node_t implements a left-child, right-sibling n-ary tree.
-   Each node maintains the index of its left-most child, its
-   immediate-right sibling, and its parent. The indices are directly
-   indexable into the node_pool */
+   Each node maintains the index of its left-most child (`child_idx`),
+   its immediate-right sibling (`sibling_idx`), and its parent
+   (`parent_idx`).  These indices are the pool indices from the
+   `node_pool`. */
 
-typedef struct fd_ghost_node fd_ghost_node_t;
 struct __attribute__((aligned(128UL))) fd_ghost_node {
   ulong             slot;         /* slot this node is tracking, also the map key */
   ulong             next;         /* reserved for internal use by fd_pool and fd_map_chain */
-  ulong             weight;       /* amount of stake (in lamports) that has voted for this slot or any of its descendants */
-  ulong             stake;        /* amount of stake (in lamports) that has voted for this slot */
-  ulong             gossip_stake; /* amount of stake (in lamports) that has voted for this slot via gossip (sans replay overlap) */
-  ulong             rooted_stake; /* amount of stake (in lamports) that has rooted this slot */
-  int               eqvoc;        /* flag there are equivocating blocks for this slot */
-  ulong             parent_idx;   /* index of the parent in the node pool */
-  ulong             child_idx;    /* index of the left-most child in the node pool */
-  ulong             sibling_idx;  /* index of the next sibling in the node pool */
+  ulong             weight;       /* total stake from replay votes for this slot and descendants */
+  ulong             replay_stake; /* total stake from replay votes for this slot */
+  ulong             gossip_stake; /* total stake from gossip votes for this slot */
+  ulong             rooted_stake; /* total stake that has rooted this slot */
+  int               valid;        /* whether this node is valid for fork choice (fd_ghost_head) */
+  ulong             parent_idx;   /* parent's node pool index */
+  ulong             child_idx;    /* left-most child's node pool index */
+  ulong             sibling_idx;  /* right sibling's node pool index */
 };
-
-#define FD_GHOST_EQV_SAFE ( 0.52 )
-#define FD_GHOST_OPT_CONF ( 2.0 / 3.0 )
+typedef struct fd_ghost_node fd_ghost_node_t;
 
 #define POOL_NAME fd_ghost_node_pool
 #define POOL_T    fd_ghost_node_t
@@ -119,20 +129,32 @@ typedef struct fd_ghost_vote fd_ghost_vote_t;
    ----------------------
 */
 
-struct __attribute__((aligned(128UL))) fd_ghost {
+#define FD_GHOST_ALIGN (128UL)
+#define FD_GHOST_MAGIC (0xf17eda2ce794057UL) /* firedancer ghost */
+
+struct __attribute__((aligned(FD_GHOST_ALIGN))) fd_ghost {
 
   /* Metadata */
 
-  ulong                 root_idx;
-  ulong                 total_stake;
-  ulong                 ghost_gaddr;
+  ulong magic;       /* ==FD_GHOST_MAGIC */
+  ulong ghost_gaddr; /* wksp gaddr of this in the backing wksp, non-zero gaddr */
+  ulong seed;        /* seed for various hashing function used under the hood, arbitrary */
+  ulong root_idx;    /* node_pool idx of the root */
+  ulong total_stake; /* total amount of stake */
 
-  /* Inline data structures */
+  /* The ghost node_pool is a memory pool of tree nodes from which one
+     is allocated for each slot.  The node map is a map_para to support
+     fast, parallel O(1) querying of ghost nodes by slot. */
 
-  ulong                 node_pool_gaddr;
-  ulong                 node_map_gaddr;
-  ulong                 vote_pool_gaddr;
-  ulong                 vote_map_gaddr;
+  ulong node_pool_gaddr;
+  ulong node_map_gaddr;
+
+  /* The ghost node_pool is a memory pool of tree nodes from which one
+     is allocated for each slot.  The node map is a map_para to support
+     fast, parallel O(1) querying of ghost nodes by slot. */
+
+  ulong vote_pool_gaddr;
+  ulong vote_map_gaddr;
 };
 typedef struct fd_ghost fd_ghost_t;
 
@@ -165,7 +187,6 @@ fd_ghost_footprint( ulong node_max, ulong vote_max ) {
       fd_ghost_vote_map_align(),  fd_ghost_vote_map_footprint( vote_max ) ),
     fd_ghost_align() );
 }
-/* clang-format on */
 
 /* fd_ghost_new formats an unused memory region for use as a ghost.
    mem is a non-NULL pointer to this region in the local address space
@@ -213,6 +234,11 @@ fd_ghost_init( fd_ghost_t * ghost, ulong root, ulong total_stake );
 
 /* Accessors */
 
+/* fd_ghost_wksp returns the local join to the wksp backing the ghost.
+   The lifetime of the returned pointer is at least as long as the
+   lifetime of the local join.  Assumes ghost is a current local
+   join. */
+
 FD_FN_PURE static inline fd_wksp_t *
 fd_ghost_wksp( fd_ghost_t const * ghost ) {
   return (fd_wksp_t *)( ( (ulong)ghost ) - ghost->ghost_gaddr );
@@ -228,13 +254,6 @@ fd_ghost_node_map( fd_ghost_t const * ghost ) {
   return fd_wksp_laddr_fast( fd_ghost_wksp( ghost ), ghost->node_map_gaddr );
 }
 
-FD_FN_PURE static inline fd_ghost_node_t const *
-fd_ghost_query( fd_ghost_t const * ghost, ulong slot ) {
-  fd_ghost_node_map_t * node_map = fd_ghost_node_map( ghost );
-  fd_ghost_node_t * node_pool = fd_ghost_node_pool( ghost );
-  return fd_ghost_node_map_ele_query_const( node_map, &slot, NULL, node_pool );
-}
-
 FD_FN_PURE static inline fd_ghost_vote_t *
 fd_ghost_vote_pool( fd_ghost_t const * ghost ) {
   return fd_wksp_laddr_fast( fd_ghost_wksp( ghost ), ghost->vote_pool_gaddr );
@@ -245,10 +264,76 @@ fd_ghost_vote_map( fd_ghost_t const * ghost ) {
   return fd_wksp_laddr_fast( fd_ghost_wksp( ghost ), ghost->vote_map_gaddr );
 }
 
-/* Operations */
+/* fd_ghost_child returns a pointer to the ghost root.  Assumes ghost is
+   a current local join. */
 
-bool
+FD_FN_PURE static inline fd_ghost_node_t const *
+fd_ghost_root( fd_ghost_t const * ghost ) {
+  return fd_ghost_node_pool_ele_const( fd_ghost_node_pool( ghost ), ghost->root_idx );
+}
+
+/* fd_ghost_child returns a pointer to the left-most child of `parent`.
+   Assumes ghost is a current local join and child is a valid pointer
+   to a node_pool element inside ghost. */
+
+FD_FN_PURE static inline fd_ghost_node_t const *
+fd_ghost_parent( fd_ghost_t const * ghost, fd_ghost_node_t const * child ) {
+  return fd_ghost_node_pool_ele_const( fd_ghost_node_pool( ghost ), child->parent_idx );
+}
+
+/* fd_ghost_child returns a pointer to the left-most child of `parent`.
+   Assumes ghost is a current local join and parent is a valid pointer
+   to a node_pool element inside ghost. */
+
+FD_FN_PURE static inline fd_ghost_node_t const *
+fd_ghost_child( fd_ghost_t const * ghost, fd_ghost_node_t const * parent ) {
+  return fd_ghost_node_pool_ele_const( fd_ghost_node_pool( ghost ), parent->child_idx );
+}
+
+/* fd_ghost_head greedily traverses the ghost beginning from `node`,
+   returning the ending leaf of the traversal (see top-level
+   documentation for traversal details). Assumes ghost is a current
+   local join and has been initialized with fd_ghost_init and is
+   therefore non-empty. */
+
+FD_FN_PURE fd_ghost_node_t const *
+fd_ghost_head( fd_ghost_t const * ghost, fd_ghost_node_t const * node );
+
+/* fd_ghost_query returns the node keyed by `slot` or NULL if not
+   found. */
+
+FD_FN_PURE static inline fd_ghost_node_t const *
+fd_ghost_query( fd_ghost_t const * ghost, ulong slot ) {
+  fd_ghost_node_map_t * node_map = fd_ghost_node_map( ghost );
+  fd_ghost_node_t * node_pool = fd_ghost_node_pool( ghost );
+  return fd_ghost_node_map_ele_query_const( node_map, &slot, NULL, node_pool );
+}
+
+/* fd_ghost_gca returns the greatest common ancestor of slot1, slot2 in
+   ghost.  Assumes slot1 or slot2 are present in ghost (warns and
+   returns NULL with handholding enabled).  This is guaranteed to be
+   non-NULL if slot1 and slot2 are both present. */
+
+FD_FN_PURE fd_ghost_node_t const *
+fd_ghost_gca( fd_ghost_t const * ghost, ulong slot1, ulong slot2 );
+
+/* fd_ghost_is_descendant returns 1 if `ancestor_slot` is an ancestor of
+   `slot`, 0 otherwise.  Assumes slot is present in ghost (warns and
+   returns 0 early if handholding is on).  Does not assume the same of
+   ancestor_slot. */
+
+FD_FN_PURE int
+fd_ghost_is_ancestor( fd_ghost_t const * ghost, ulong slot, ulong ancestor_slot );
+
+/* fd_ghost_verify checks the ghost is not obviously correct as well
+   invariants are being preserved ie. the weight of every node is >= the
+   sum of weights of its direct children.  Returns 0 if verify succeeds,
+   -1 otherwise. */
+
+FD_FN_PURE int
 fd_ghost_verify( fd_ghost_t const * ghost );
+
+/* Operations */
 
 /* fd_ghost_node_insert inserts a new node with slot as the key into the
    ghost.  Assumes slot >= ghost->smr, slot is not already in ghost,
@@ -309,37 +394,7 @@ fd_ghost_rooted_vote( fd_ghost_t * ghost, ulong slot, fd_pubkey_t const * pubkey
 fd_ghost_node_t const *
 fd_ghost_publish( fd_ghost_t * ghost, ulong slot );
 
-/* Traversals */
-
-/* fd_ghost_gca returns the greatest common ancestor of slot1, slot2 in
-   ghost.  Assumes slot1 or slot2 are present in ghost (warns and
-   returns NULL with handholding enabled).  This is guaranteed to be
-   non-NULL if slot1 and slot2 are both present. */
-
-FD_FN_PURE fd_ghost_node_t const *
-fd_ghost_gca( fd_ghost_t const * ghost, ulong slot1, ulong slot2 );
-
-/* fd_ghost_head returns ghost's head.  Assumes caller has called
-fd_ghost_init and that the ghost is non-empty, ie. has a root. */
-
-FD_FN_PURE fd_ghost_node_t const *
-fd_ghost_head( fd_ghost_t const * ghost );
-
-/* fd_ghost_is_descendant returns 1 if slot descends from ancestor_slot,
-   0 otherwise.  Assumes slot is present in ghost (warns and returns 0
-   early if handholding is on).  Does not assume the same of
-   ancestor_slot. */
-
-FD_FN_PURE int
-fd_ghost_is_descendant( fd_ghost_t const * ghost, ulong slot, ulong ancestor_slot );
-
-fd_ghost_node_t const *
-fd_ghost_root_node( fd_ghost_t const * ghost );
-
-fd_ghost_node_t const *
-fd_ghost_child_node( fd_ghost_t const * ghost, fd_ghost_node_t const * parent );
-
-/* Misc */
+/* Printers */
 
 /* fd_ghost_slot_print pretty-prints a formatted ghost tree.  slot
    controls which slot to begin printing from (will appear as the root
@@ -350,9 +405,9 @@ fd_ghost_child_node( fd_ghost_t const * ghost, fd_ghost_node_t const * parent );
    respectively.  In that case, this would print ghost beginning from
    the root.  See fd_ghost_print.
 
-   Typical usage is to pass in the most recently executed slot, in which
-   that slot in a leaf in ghost, and pick an appropriate depth for
-   visualization (20 is a reasonable default). */
+   Alternatively, caller can pass in the most recently executed slot,
+   and pick an appropriate depth for visualization (20 is a reasonable
+   default). */
 
 void
 fd_ghost_slot_print( fd_ghost_t * ghost, ulong slot, ulong depth );
