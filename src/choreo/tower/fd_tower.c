@@ -310,7 +310,7 @@ fd_tower_switch_check( fd_tower_t const * tower,
   */
   fd_ghost_node_t * node_pool = fd_ghost_node_pool( ghost );
   fd_ghost_node_t const * gca = fd_ghost_gca( ghost, latest_vote->slot, fork->slot );
-  ulong gca_idx = fd_ghost_node_map_idx_query( fd_ghost_node_map( ghost ), &gca->slot, ULONG_MAX, fd_ghost_node_pool( ghost ) );
+  ulong gca_idx = fd_ghost_node_map_idx_query( fd_ghost_node_map( ghost ), &gca->slot, ULONG_MAX, node_pool );
 
   /* gca_child is our latest_vote slot's ancestor that is also a direct
      child of GCA.  So we do not count it towards the stake of the
