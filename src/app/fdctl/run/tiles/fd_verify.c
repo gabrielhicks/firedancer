@@ -4,6 +4,9 @@
 
 #include <linux/unistd.h>
 
+#define IN_KIND_QUIC   (0UL)
+#define IN_KIND_BUNDLE (1UL)
+
 /* The verify tile is a wrapper around the mux tile, that also verifies
    incoming transaction signatures match the data being signed.
    Non-matching transactions are filtered out of the frag stream. */
@@ -56,14 +59,24 @@ during_frag( fd_verify_ctx_t * ctx,
   (void)seq;
   (void)sig;
 
-  if( FD_UNLIKELY( chunk<ctx->in[in_idx].chunk0 || chunk>ctx->in[in_idx].wmark || sz>FD_TPU_MTU ) )
-    FD_LOG_ERR(( "chunk %lu %lu corrupt, not in range [%lu,%lu]", chunk, sz, ctx->in[in_idx].chunk0, ctx->in[in_idx].wmark ));
+  if( FD_UNLIKELY( ctx->in_kind[ in_idx ]==IN_KIND_QUIC ) ) {
+    if( FD_UNLIKELY( chunk<ctx->in[in_idx].chunk0 || chunk>ctx->in[in_idx].wmark || sz>FD_TPU_MTU ) )
+      FD_LOG_ERR(( "chunk %lu %lu corrupt, not in range [%lu,%lu]", chunk, sz, ctx->in[in_idx].chunk0, ctx->in[in_idx].wmark ));
 
-  uchar * src = (uchar *)fd_chunk_to_laddr( ctx->in[in_idx].mem, chunk );
-  fd_txnm_t * dst = (fd_txnm_t *)fd_chunk_to_laddr( ctx->out_mem, ctx->out_chunk );
+    uchar * src = (uchar *)fd_chunk_to_laddr( ctx->in[in_idx].mem, chunk );
+    fd_txnm_t * dst = (fd_txnm_t *)fd_chunk_to_laddr( ctx->out_mem, ctx->out_chunk );
 
-  dst->payload_sz = (ushort)sz;
-  fd_memcpy( fd_txnm_payload( dst ), src, sz );
+    dst->payload_sz = (ushort)sz;
+    dst->block_engine.bundle_id = 0UL;
+    fd_memcpy( fd_txnm_payload( dst ), src, sz );
+  } else if( FD_UNLIKELY( ctx->in_kind[ in_idx ]==IN_KIND_BUNDLE ) ) {
+    if( FD_UNLIKELY( chunk<ctx->in[in_idx].chunk0 || chunk>ctx->in[in_idx].wmark || sz>FD_TPU_PARSED_MTU ) )
+      FD_LOG_ERR(( "chunk %lu %lu corrupt, not in range [%lu,%lu]", chunk, sz, ctx->in[in_idx].chunk0, ctx->in[in_idx].wmark ));
+
+    uchar * src = (uchar *)fd_chunk_to_laddr( ctx->in[in_idx].mem, chunk );
+    uchar * dst = (uchar *)fd_chunk_to_laddr( ctx->out_mem, ctx->out_chunk );
+    fd_memcpy( dst, src, sz );
+  }
 }
 
 static inline void
@@ -145,6 +158,14 @@ unprivileged_init( fd_topo_t *      topo,
     ctx->in[i].mem = link_wksp->wksp;
     ctx->in[i].chunk0 = fd_dcache_compact_chunk0( ctx->in[i].mem, link->dcache );
     ctx->in[i].wmark  = fd_dcache_compact_wmark ( ctx->in[i].mem, link->dcache, link->mtu );
+
+    if( FD_UNLIKELY( !strcmp( link->name, "quic_verify" ) ) ) {
+      ctx->in_kind[ i ] = IN_KIND_QUIC;
+    } else if( FD_UNLIKELY( !strcmp( link->name, "bundle_verify" ) ) ) {
+      ctx->in_kind[ i ] = IN_KIND_BUNDLE;
+    } else {
+      FD_LOG_ERR(( "unexpected link name %s", link->name ));
+    }
   }
 
   ctx->out_mem    = topo->workspaces[ topo->objs[ topo->links[ tile->out_link_id[ 0 ] ].dcache_obj_id ].wksp_id ].wksp;

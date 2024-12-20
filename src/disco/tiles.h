@@ -121,11 +121,37 @@ struct fd_txnm {
       determined, this will be a slot around 150 in the future. */
    ulong    reference_slot;
 
-   ushort   payload_sz;
-
    /* Can be computed from the txn_t but it's expensive to parse again,
       so we just store this redundantly. */
    ulong    txn_t_sz;
+
+   ushort   payload_sz;
+
+   struct {
+      /* If the transaction is part of a bundle, the bundle_id will be
+         non-zero, and if this transaction is the first one in the
+         bundle, bundle_txn_cnt will be non-zero.
+
+         The pack tile can accumulate transactions from a bundle until
+         it has all of them, at which point the bundle is schedulable.
+
+         Bundles will not arrive to pack interleaved with other bundles
+         (although might be interleaved with other non-bundle
+         transactions), so if pack sees the bundle_id change before
+         collecting all the bundle_txn_cnt transactions, it should
+         abandon the bundle, as one or more of the transactions failed
+         to signature verify or resolve.
+         
+         The commission and commission_pubkey fields are provided by
+         the block engine, and the validator will crank the tip payment
+         program with these values, if it is not using them already.
+         These fields are only provided on the first transaction in a
+         bundle. */
+      ulong bundle_id;
+      ulong bundle_txn_cnt;
+      uchar commission;
+      uchar commission_pubkey[ 32 ];
+   } block_engine;
 
    /* An 8 byte tag of the first signature in the transaction, for use
       by dedup. */
@@ -202,5 +228,14 @@ fd_txnm_realized_footprint( fd_txnm_t const * txnm,
                                  alignof(fd_acct_addr_t) )        \
                               +256UL*sizeof(fd_acct_addr_t),      \
                               alignof(fd_txnm_t) )
+
+struct fd_bundle_msg {
+
+
+   ulong      txn_cnt;
+   fd_txn_p_t txns[ 5 ];
+};
+
+typedef struct fd_bundle_msg fd_bundle_msg_t;
 
 #endif /* HEADER_fd_src_app_fdctl_run_tiles_h */
