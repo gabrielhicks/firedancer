@@ -417,6 +417,12 @@ fdctl_cfg_validate( config_t * cfg ) {
     }                                                    \
   } while(0)
 
+#define CFG_HAS_UINT(key) do {                                  \
+    if ((long)cfg->key < 0 || cfg->key > UINT_MAX) {             \
+      FD_LOG_ERR(("`%s` is out of bounds or negative", #key));   \
+    }                                                            \
+  } while (0)
+
   CFG_HAS_NON_EMPTY( name );
   CFG_HAS_NON_EMPTY( scratch_directory );
   CFG_HAS_NON_EMPTY( dynamic_port_range );
@@ -430,8 +436,8 @@ fdctl_cfg_validate( config_t * cfg ) {
 
   CFG_HAS_NON_ZERO( gossip.port );
 
-  CFG_HAS_NON_ZERO( snapshots.full_snapshot_interval_slots );
-  CFG_HAS_NON_ZERO( snapshots.incremental_snapshot_interval_slots );
+  CFG_HAS_UINT( snapshots.full_snapshot_interval_slots );
+  CFG_HAS_UINT( snapshots.incremental_snapshot_interval_slots );
   CFG_HAS_NON_ZERO( snapshots.minimum_snapshot_download_speed );
 
   CFG_HAS_NON_EMPTY( layout.affinity );
