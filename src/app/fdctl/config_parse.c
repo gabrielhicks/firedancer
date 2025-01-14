@@ -417,7 +417,7 @@ fdctl_cfg_validate( config_t * cfg ) {
     }                                                    \
   } while(0)
 
-#define CFG_HAS_UINT(key) do {                                  \
+# define CFG_HAS_UINT(key) do {                                  \
     if ((long)cfg->key < 0 || cfg->key > UINT_MAX) {             \
       FD_LOG_ERR(("`%s` is out of bounds or negative", #key));   \
     }                                                            \
@@ -497,4 +497,5 @@ fdctl_cfg_validate( config_t * cfg ) {
 # undef CFG_HAS_NON_EMPTY
 # undef CFG_HAS_NON_ZERO
 # undef CFG_HAS_POW2
+# undef CFG_HAS_UINT
 }
